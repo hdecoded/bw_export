@@ -10,7 +10,14 @@ source "$SCRIPT_DIR/bw_config.sh"
 source "$SCRIPT_DIR/bw_functions.sh"
 
 main() {
-    echo "Launching Bitwarden backup workflow..."
+    LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
+    mkdir -p "$LOG_DIR"
+    local run_id
+    run_id=$(date +"%Y%m%d_%H%M%S")
+    LOG_FILE="$LOG_DIR/bw_export_${run_id}.log"
+
+    log_info "Launching Bitwarden backup workflow..."
+    log_info "Log file: $LOG_FILE"
 
     load_user_email
     load_master_password
