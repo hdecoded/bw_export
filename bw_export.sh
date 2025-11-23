@@ -28,10 +28,11 @@ main() {
 
     echo "Preparing export targets and retrieving data..."
     ensure_save_directory
+    start_sync
 
     local timestamp
     timestamp=$(date +"%Y%m%d_%H%M%S")
-
+    
     export_personal_vault "$timestamp"
     export_org_vault "$timestamp"
     download_all_attachments

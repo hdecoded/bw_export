@@ -116,6 +116,11 @@ prompt_for_unencrypted_export() {
     fi
 }
 
+start_sync(){
+    log_info "Syncing Vault Started"
+    bw sync
+}
+
 ensure_save_directory() {
     if [[ ! -d "$SAVE_FOLDER" ]]
     then
