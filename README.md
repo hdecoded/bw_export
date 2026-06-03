@@ -1,72 +1,105 @@
 # Bitwarden Export Automation
 
-Utility scripts that back up your Bitwarden vault (personal + organization) and download all Bitwarden file attachments in one go.
+Backs up your Bitwarden vault (personal + optional organization) and downloads all file attachments in one command.
 
-## Script Overview
-- `bw_export.sh` – orchestrator you run (`./bw_export.sh`). Loads configuration, sources helpers, executes the backup workflow, and relocks the CLI session when finished.
-- `bw_config.sh` – central configuration. Defines where exports land, which Keychain services hold credentials, and the organization ID (optional).
-- `bw_functions.sh` – reusable helper functions. Handles Keychain lookups, Bitwarden authentication/unlock, exports, attachment downloads, and final reporting.
+## How It Works
+
+Running `./bw_export.sh` executes this sequence:
+
+1. Checks Bitwarden CLI login status — authenticates via API key if needed
+2. Loads the master password from Keychain and unlocks the vault
+3. Loads the export password from Keychain (determines encrypted vs plain JSON)
+4. Syncs the vault (`bw sync`) to ensure data is current
+5. Exports the personal vault JSON
+6. Exports the organization vault JSON (if `ORG_ID` is configured)
+7. Downloads all file attachments, skipping files that haven't changed
+8. Reports any items sitting in Bitwarden Trash (not exported by the CLI)
+9. Locks the vault
+
+Everything is logged to `logs/bw_export_<timestamp>.log` and printed to stdout.
 
 ## Requirements
-- macOS (or any Bash environment with equivalent Keychain commands)
-- Bash 3.2+ (macOS default is fine)
-- Bitwarden CLI (`bw`) – <https://bitwarden.com/help/cli/>
-- `jq` for JSON parsing – <https://github.com/stedolan/jq/>
 
-## Where Backups Are Stored
-The locations come from `bw_config.sh`; typical defaults are:
-- `SAVE_FOLDER` → `/path/to/bitwarden/json/backups`  
-  Contains the exported JSON files. Personal and organization vaults are named `bitwarden_<scope>_<timestamp>.json` or `.encrypted.json`.
-- `SAVE_FOLDER_ATTACHMENTS` → `/path/to/bitwarden/attachment/backups`  
-  Contains attachment folders. Each vault item with attachments gets its own subfolder.
+- macOS
+- Bash 3.2+
+- [Bitwarden CLI](https://bitwarden.com/help/cli/) (`bw`)
+- [`jq`](https://github.com/stedolan/jq)
+- [direnv](https://direnv.net/) (recommended — loads API key credentials automatically)
 
-Change these paths in `bw_config.sh` (or override via environment variables) to match your environment.
+## One-Time Setup
 
-## One-Time Setup on macOS
-1. **Configure output folders**  
-   Edit `bw_config.sh` and set `SAVE_FOLDER`, `SAVE_FOLDER_ATTACHMENTS`, and (optionally) `ORG_ID`.
+### 1. Get your Bitwarden API key
 
-2. **Store Bitwarden secrets in the Keychain**  
-   ```bash
-   # Bitwarden login email
-   security add-generic-password -a "$USER" -s bw_email -w "name@example.com"
+In Bitwarden web vault → Account Settings → Security → API Key. Note the `client_id` and `client_secret`.
 
-   # Bitwarden master password
-   security add-generic-password -a "$USER" -s bw_pass -w "your-master-password"
+### 2. Create `.envrc` with your API key
 
-   # Optional export password (produces encrypted JSON)
-   security add-generic-password -a "$USER" -s bw_export_pass -w "strong-export-password"
-   ```
-   Remove a secret later with `security delete-generic-password -s <service-name>`.
-
-## Running the Backup
 ```bash
-cd /path/to/bw_export
+export BW_CLIENTID=your.client_id_here
+export BW_CLIENTSECRET=your_client_secret_here
+```
+
+Then allow direnv to load it:
+
+```bash
+direnv allow .
+```
+
+Without direnv, export both variables in your shell before running the script.
+
+### 3. Store credentials in macOS Keychain
+
+```bash
+# Bitwarden master password
+security add-generic-password -a "$USER" -s bw_pass -w "your-master-password"
+
+# Export encryption password (optional — omit for plain JSON exports)
+security add-generic-password -a "$USER" -s bw_export_pass -w "strong-export-password"
+```
+
+To remove a Keychain entry later:
+
+```bash
+security delete-generic-password -s bw_pass
+```
+
+### 4. Configure export paths
+
+Edit `bw_config.sh` to set where exports are saved:
+
+```bash
+: "${SAVE_FOLDER:=/path/to/json/backups}"
+: "${SAVE_FOLDER_ATTACHMENTS:=/path/to/attachment/backups}"
+
+# Optional: set your organization ID for shared vault exports
+: "${ORG_ID:=}"
+```
+
+## Running
+
+```bash
 ./bw_export.sh
 ```
 
-During the run you will see step-by-step logging:
-- Confirmation that the email, master password, and export password were retrieved from the Keychain.
-- Authentication status (login + vault unlock).
-- Export locations displayed using friendly labels (`BW Backups/...` and `Attachments/...`).
-- Attachment download progress (each file lists its destination).
-- Trash summary noting items that Bitwarden CLI cannot export.
-
-The script exits non-zero if any critical step fails (missing Keychain item, export directory, login failure, etc.), so automation layers can detect issues.
+The script accepts no arguments. It exits non-zero on any failure, so it's safe to use in automated pipelines.
 
 ## What Gets Exported
-- **Personal vault JSON**  
-  Stored under `SAVE_FOLDER` as `bitwarden_personal_<timestamp>.json` (unencrypted) or `.encrypted.json` (when `bw_export_pass` exists).
-- **Organization vault JSON** (when `ORG_ID` is set)  
-  Stored under `SAVE_FOLDER` as `bitwarden_organization_<timestamp>.json` or `.encrypted.json`.
-- **Attachments**  
-  Downloaded into `SAVE_FOLDER_ATTACHMENTS/<item_name>/`. Item names are sanitized to filesystem-safe strings; empty names fall back to the item ID.
 
-Items that live in the Bitwarden Trash are not included—Bitwarden’s CLI cannot export them. The script highlights the trash count after the backup so you can purge or restore as needed.
+| Output | Location | Format |
+|---|---|---|
+| Personal vault | `SAVE_FOLDER/bitwarden_personal_<timestamp>.json` | Plain JSON or `.encrypted.json` |
+| Organization vault | `SAVE_FOLDER/bitwarden_organization_<timestamp>.json` | Plain JSON or `.encrypted.json` |
+| Attachments | `SAVE_FOLDER_ATTACHMENTS/<item_name>/<filename>` | Original files |
+
+**Encrypted vs plain JSON** — determined by whether `bw_export_pass` exists in Keychain. If it does, exports use Bitwarden's `encrypted_json` format. If not, the script warns and asks for confirmation before writing plain JSON.
+
+**Attachments** — item names are sanitized to filesystem-safe strings (alphanumeric, `_`, `.`, `-`); names that collapse to empty fall back to the item UUID. Files that already exist and are unchanged are skipped.
+
+**Trash items** — Bitwarden CLI cannot export trashed items. The script reports the count at the end so you can purge or restore manually.
 
 ## Safety Notes
-- No secrets are written to disk; everything comes from the Keychain at runtime.
-- `set -euo pipefail` is enabled to stop on errors and undefined variables.
-- The Bitwarden CLI session is explicitly locked again at the end of the run.
 
-Run `./bw_export.sh --help` for standard Bash usage details (the script accepts no additional arguments, but forwards any provided options to the helper functions). Make sure you inspect and adapt the scripts to match your security requirements before relying on them for regular backups.
+- No secrets are written to disk — master password and export password come from Keychain at runtime; API credentials come from the environment.
+- Master password is piped via stdin to `bw` to avoid exposing it in the process list.
+- `set -euo pipefail` stops the script on any error or undefined variable.
+- The CLI session is explicitly locked at the end of every run.
