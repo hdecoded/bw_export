@@ -19,9 +19,9 @@ main() {
     log_info "Launching Bitwarden backup workflow..."
     log_info "Log file: $LOG_FILE"
 
-    load_user_email
-    load_master_password
+    # load_user_email
     ensure_login
+    load_master_password
     unlock_vault
     load_export_password
     prompt_for_unencrypted_export

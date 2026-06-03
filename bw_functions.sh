@@ -56,7 +56,7 @@ ensure_login() {
     if [[ $(bw status | jq -r .status) == "unauthenticated" ]]
     then
         log_info "Authenticating Bitwarden CLI session..."
-        bw login "$USER_EMAIL" "$BW_PASSWORD" --method 0 --quiet
+        bw login --apikey
     fi
 
     if [[ $(bw status | jq -r .status) == "unauthenticated" ]]
@@ -133,16 +133,20 @@ ensure_save_directory() {
 
 export_personal_vault() {
     local timestamp="$1"
+    # Real path used for the file write; label path used in log messages to avoid noisy absolute paths.
     local personal_export_base="$SAVE_FOLDER/bitwarden_personal_$timestamp"
     local personal_log_base="$SAVE_FOLDER_LABEL/bitwarden_personal_$timestamp"
 
     if [[ -z "$BW_EXPORT_PASSWORD" ]]
     then
+        # No encryption password in Keychain — fall back to plain JSON.
         log_info "Exporting personal vault to ${personal_log_base}.json (unencrypted)."
-        bw export --format json --output "${personal_export_base}.json"
+        # Pipe the master password via stdin instead of a flag to avoid exposing it in the process list.
+        printf '%s\n' "$BW_PASSWORD" | bw export --format json --output "${personal_export_base}.json"
     else
+        # Encryption password available — write Bitwarden's encrypted_json format.
         log_info "Exporting personal vault to ${personal_log_base}.encrypted.json (encrypted)."
-        bw export --format encrypted_json --password "$BW_EXPORT_PASSWORD" --output "${personal_export_base}.encrypted.json"
+        printf '%s\n' "$BW_PASSWORD" | bw export --format encrypted_json --password "$BW_EXPORT_PASSWORD" --output "${personal_export_base}.encrypted.json"
     fi
 }
 
@@ -160,10 +164,10 @@ export_org_vault() {
     if [[ -z "$BW_EXPORT_PASSWORD" ]]
     then
         log_info "Exporting organization vault to ${org_log_base}.json (unencrypted)."
-        bw export --organizationid "$ORG_ID" --format json --output "${org_export_base}.json"
+        printf '%s\n' "$BW_PASSWORD" | bw export --organizationid "$ORG_ID" --format json --output "${org_export_base}.json"
     else
         log_info "Exporting organization vault to ${org_log_base}.encrypted.json (encrypted)."
-        bw export --organizationid "$ORG_ID" --format encrypted_json --password "$BW_EXPORT_PASSWORD" --output "${org_export_base}.encrypted.json"
+        printf '%s\n' "$BW_PASSWORD" | bw export --organizationid "$ORG_ID" --format encrypted_json --password "$BW_EXPORT_PASSWORD" --output "${org_export_base}.encrypted.json"
     fi
 }
 
@@ -171,8 +175,12 @@ download_all_attachments() {
     local attachment_lines
     local safe_item_name
     local target_dir
+    local target_file
+    local tmp_file
+    # Remove the temp file on any exit so a mid-loop failure doesn't leave it behind.
+    trap '[[ -n "${tmp_file:-}" && -f "$tmp_file" ]] && rm -f "$tmp_file"' RETURN
 
-    attachment_lines=$(bw list items | jq -r '.[]
+    attachment_lines=$(printf '%s\n' "$BW_PASSWORD" | bw list items | jq -r '.[]
         | select(.attachments != null)
         | . as $item
         | .attachments[]
@@ -187,9 +195,22 @@ download_all_attachments() {
             safe_item_name=$(printf '%s' "$item_name" | tr -c '[:alnum:]_.-' '_')
             [[ -z "$safe_item_name" ]] && safe_item_name="$item_id"
             target_dir="$SAVE_FOLDER_ATTACHMENTS/$safe_item_name"
+            target_file="$target_dir/$attachment_filename"
             mkdir -p "$target_dir"
-            log_info "Attachment saved: $SAVE_FOLDER_ATTACHMENTS_LABEL/$safe_item_name/$attachment_filename"
-            bw get attachment "$attachment_filename" --itemid "$item_id" --output "$target_dir/"
+
+            # Always download to a temp file so we can compare before committing.
+            tmp_file=$(mktemp)
+            printf '%s\n' "$BW_PASSWORD" | bw get attachment "$attachment_filename" --itemid "$item_id" --output "$tmp_file"
+
+            if [[ -f "$target_file" ]] && cmp -s "$tmp_file" "$target_file"
+            then
+                # File exists and content is identical — no write needed.
+                rm "$tmp_file"
+                log_info "Attachment unchanged, skipping: $SAVE_FOLDER_ATTACHMENTS_LABEL/$safe_item_name/$attachment_filename"
+            else
+                mv "$tmp_file" "$target_file"
+                log_info "Attachment saved: $SAVE_FOLDER_ATTACHMENTS_LABEL/$safe_item_name/$attachment_filename"
+            fi
         done <<< "$attachment_lines"
     else
         log_info "No attachments detected; skipping attachment download."
@@ -198,7 +219,7 @@ download_all_attachments() {
 
 report_trash_items() {
     local trash_count
-    trash_count=$(bw list items --trash | jq -r '. | length')
+    trash_count=$(printf '%s\n' "$BW_PASSWORD" | bw list items --trash | jq -r '. | length')
 
     if (( trash_count > 0 ))
     then
